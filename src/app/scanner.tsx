@@ -2,6 +2,7 @@ import {
   CameraView,
   useCameraPermissions,
 } from 'expo-camera';
+import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import {
   router,
   useFocusEffect,
@@ -25,7 +26,6 @@ import { supabase } from '../lib/supabase';
 
 type CapturedPhoto = {
   uri: string;
-  base64?: string | null;
 };
 
 type ReceiptItem = {
@@ -38,175 +38,209 @@ type ReceiptItem = {
   confirmed: boolean;
 };
 
-function cleanLine(line: string) {
-  return line
-    .replace(/\s+/g, ' ')
-    .trim();
+// OCR.space Free membatasi ukuran file gambar hingga 1,5 MB.
+// Gunakan batas aman 1,3 MB (ukuran biner JPEG, bukan panjang Base64).
+const MAX_OCR_IMAGE_BYTES = 1_300_000;
+
+function base64ByteLength(base64: string): number {
+  const clean = base64.replace(/^data:[^,]*,/, '').replace(/\s/g, '');
+  const padding = (clean.match(/=+$/)?.[0]?.length ?? 0);
+  return Math.floor((clean.length * 3) / 4) - padding;
 }
 
-function looksLikeReceiptNoise(
-  line: string
-) {
-  const lower =
-    line.toLowerCase();
-
-  const noiseWords = [
-    'total',
-    'subtotal',
-    'grand total',
-    'cash',
-    'tunai',
-    'change',
-    'kembalian',
-    'tax',
-    'pajak',
-    'ppn',
-    'discount',
-    'diskon',
-    'receipt',
-    'struk',
-    'thank you',
-    'terima kasih',
-    'telp',
-    'phone',
-    'date',
-    'tanggal',
-    'time',
-    'waktu',
-    'cashier',
-    'kasir',
-    'payment',
-    'pembayaran',
-    'visa',
-    'mastercard',
-    'debit',
-    'credit',
-    'qty',
-    'harga',
-    'price',
-    'amount',
+async function compressPhotoForOCR(uri: string): Promise<string> {
+  // Coba kualitas/resolusi tinggi dulu agar huruf tetap terbaca.
+  // Turunkan hanya bila ukuran masih melewati batas OCR.space.
+  const attempts = [
+    { width: 1800, quality: 0.78 },
+    { width: 1600, quality: 0.68 },
+    { width: 1400, quality: 0.58 },
+    { width: 1200, quality: 0.48 },
+    { width: 1000, quality: 0.40 },
+    { width: 800, quality: 0.32 },
   ];
 
-  if (
-    noiseWords.some((word) =>
-      lower.includes(word)
-    )
-  ) {
-    return true;
-  }
+  for (const attempt of attempts) {
+    const context = ImageManipulator.manipulate(uri);
+    context.resize({ width: attempt.width });
+    const rendered = await context.renderAsync();
+    const saved = await rendered.saveAsync({
+      compress: attempt.quality,
+      format: SaveFormat.JPEG,
+      base64: true,
+    });
 
-  /*
-    Buang baris yang hampir semuanya
-    angka / simbol / nominal harga.
-  */
-  const letters =
-    line.match(/[A-Za-z]/g)
-      ?.length || 0;
+    if (!saved.base64) {
+      throw new Error('Gagal membaca hasil kompresi foto.');
+    }
 
-  if (letters < 2) {
-    return true;
-  }
+    const bytes = base64ByteLength(saved.base64);
+    console.log(`Foto OCR: ${(bytes / 1_000_000).toFixed(2)} MB`);
 
-  return false;
-}
-
-function extractProductName(
-  line: string
-) {
-  let value = cleanLine(line);
-
-  /*
-    Hapus nominal harga di ujung.
-    Contoh:
-    "SUSU UHT 1L 18.500"
-    menjadi
-    "SUSU UHT 1L"
-  */
-  value = value.replace(
-    /\s+(?:rp\s*)?[\d.,]+(?:\s*)$/i,
-    ''
-  );
-
-  /*
-    Hapus pola jumlah/harga yang umum
-    di bagian awal.
-  */
-  value = value.replace(
-    /^\d+\s*[xX]\s*/i,
-    ''
-  );
-
-  value = value.replace(
-    /^\d+\s+/,
-    ''
-  );
-
-  return value.trim();
-}
-
-function parseReceiptText(
-  text: string
-): ReceiptItem[] {
-  const rawLines =
-    text
-      .split(/\r?\n/)
-      .map(cleanLine)
-      .filter(Boolean);
-
-  const candidates =
-    rawLines
-      .filter(
-        (line) =>
-          !looksLikeReceiptNoise(
-            line
-          )
-      )
-      .map(extractProductName)
-      .filter(
-        (line) =>
-          line.length >= 3
-      );
-
-  /*
-    Hapus duplicate hasil OCR.
-  */
-  const unique: string[] = [];
-
-  for (const line of candidates) {
-    const normalized =
-      line.toLowerCase();
-
-    if (
-      !unique.some(
-        (existing) =>
-          existing.toLowerCase() ===
-          normalized
-      )
-    ) {
-      unique.push(line);
+    if (bytes <= MAX_OCR_IMAGE_BYTES) {
+      return `data:image/jpeg;base64,${saved.base64}`;
     }
   }
 
-  /*
-    Supaya hasil OCR yang buruk tidak
-    membuat puluhan item aneh.
-  */
-  return unique
-    .slice(0, 20)
-    .map(
-      (
-        name,
-        index
-      ): ReceiptItem => ({
-        id: `ocr-${Date.now()}-${index}`,
-        name,
-        qty: '',
-        category: 'Lainnya',
-        expiry: '',
-        notes: '',
-        confirmed: true,
-      })
-    );
+  throw new Error(
+    'Foto masih terlalu besar untuk OCR. Coba foto ulang lebih dekat ke struk.'
+  );
+}
+
+// Baca hasil OCR menjadi produk, jumlah, dan kategori.
+// OCR membaca teks; klasifikasi ini memakai aturan kata kunci,
+// sehingga pengguna tetap perlu memeriksa hasil di Konfirmasi.
+function cleanLine(line: string): string {
+  return line.replace(/\s+/g, ' ').trim();
+}
+
+const CATEGORY_KEYWORDS: { category: string; pattern: RegExp }[] = [
+  {
+    category: 'Sayur',
+    pattern: /\b(bayam|kangkung|sawi|pakcoy|pokcoy|bok\s*choy|brokoli|wortel|kentang|tomat|timun|mentimun|selada|kubis|kol|buncis|terong|tauge|taoge|labu|seledri|daun\s*bawang|daun\s*singkong|daun\s*jeruk|cabai|cabe|bawang\s*(merah|putih|bombai)|jamur|sayur|spinach|carrot|cabbage|lettuce|cucumber|mushroom|chili)\b/i,
+  },
+  {
+    category: 'Buah',
+    pattern: /\b(apel|pisang|jeruk|mangga|anggur|semangka|melon|pepaya|nanas|stroberi|strawberry|blueberry|raspberry|alpukat|avokad|avocado|pir|kiwi|lemon|limau|lime|buah\s*naga|salak|rambutan|durian|jambu|kelengkeng|lengkeng|kurma|apple|banana|orange|grape|watermelon|papaya|pineapple)\b/i,
+  },
+  {
+    category: 'Susu',
+    pattern: /\b(susu|milk|uht|yoghurt|yogurt|keju|cheese|mentega|butter|krim\s*susu|cream\s*cheese|susu\s*kental|susu\s*bubuk)\b/i,
+  },
+  {
+    category: 'Daging',
+    pattern: /\b(daging|ayam|sapi|kambing|bebek|ikan|udang|cumi|salmon|tuna|tongkol|lele|nila|bandeng|sarden|sardine|seafood|bakso|sosis|nugget|steak|beef|chicken|fish|shrimp|prawn|meat|fillet|hati\s*ayam)\b/i,
+  },
+  {
+    category: 'Cairan',
+    pattern: /\b(air\s*mineral|air\s*putih|air\s*kelapa|jus|juice|sirup|syrup|teh|tea|kopi|coffee|soda|soft\s*drink|minuman|isotonik|mineral\s*water|sparkling\s*water|kecap|saus|sauce|cuka|vinegar|minyak\s*goreng|cooking\s*oil)\b/i,
+  },
+];
+
+function detectCategory(name: string): string {
+  for (const item of CATEGORY_KEYWORDS) {
+    if (item.pattern.test(name)) return item.category;
+  }
+  return 'Lainnya';
+}
+
+const UNIT_PATTERN =
+  '(?:bungkus|bks|pack|pak|pcs|pc|buah|butir|ikat|botol|btl|kotak|box|kaleng|sachet|saset|dus|kg|kilogram|gram|gr|g|liter|ltr|l|ml)';
+
+function normalizeUnit(unit: string): string {
+  const value = unit.toLowerCase();
+  const names: Record<string, string> = {
+    bks: 'bungkus', pack: 'bungkus', pak: 'bungkus',
+    pcs: 'pcs', pc: 'pcs', btl: 'botol', box: 'kotak',
+    saset: 'sachet', kilogram: 'kg', gr: 'gram', g: 'gram',
+    ltr: 'liter', l: 'liter',
+  };
+  return names[value] || value;
+}
+
+function looksLikeReceiptNoise(line: string): boolean {
+  if (!line || !/[A-Za-z]/.test(line)) return true;
+  if (/^[-=_*~.\s]{3,}$/.test(line)) return true;
+  if (/^(?:toko|pt\.?|cv\.?|supermarket|indomaret|alfamart|hypermart|transmart|superindo|lottemart|ranch\s*market|farmers\s*market)\b/i.test(line)) return true;
+  if (/^(?:\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{2}:\d{2})\b/.test(line)) return true;
+
+  // Gunakan awalan kata, bukan .includes(), agar nama produk
+  // yang kebetulan mengandung kata lain tidak ikut terbuang.
+  if (/^(?:sub\s*total|grand\s*total|total|cash|tunai|change|kembalian|tax|pajak|ppn|discount|diskon|receipt|struk|thank\s*you|terima\s*kasih|telp|telepon|phone|tanggal|date|waktu|time|kasir|cashier|payment|pembayaran|visa|mastercard|debit|credit|harga|price|amount|qty|jumlah|alamat|jalan|jl\.?|npwp|invoice|no\.?\s*transaksi|no\.?\s*struk|metode\s*bayar)\b/i.test(line)) {
+    return true;
+  }
+
+  // Abaikan baris yang hanya memuat kode/barcode dan angka.
+  if (/^[\d\s.,:/#-]+$/.test(line)) return true;
+  return false;
+}
+
+function removeTrailingPrice(line: string): string {
+  let result = line;
+  // Contoh: BAYAM 2 BKS 12.500, SUSU UHT Rp 18000
+  result = result.replace(/\s+(?:rp\.?\s*)?\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?\s*$/i, '');
+  result = result.replace(/\s+rp\.?\s*\d+(?:[.,]\d+)?\s*$/i, '');
+  result = result.replace(/\s+\d{4,}(?:[.,]\d{2})?\s*$/, '');
+  return result.trim();
+}
+
+function parseProductLine(line: string): { name: string; qty: string } | null {
+  let name = removeTrailingPrice(cleanLine(line))
+    .replace(/^[*#-]+\s*/, '')
+    .replace(/\s+[*#-]+$/, '')
+    .trim();
+  if (!name || looksLikeReceiptNoise(name)) return null;
+
+  let qty = '';
+  let match: RegExpMatchArray | null;
+
+  // "2 x BAYAM", "2x BAYAM", "2 BKS BAYAM"
+  match = name.match(new RegExp(`^(\\d+(?:[.,]\\d+)?)\\s*[xX×]\\s+(.+)$`, 'i'));
+  if (match) {
+    qty = match[1].replace(',', '.');
+    name = match[2];
+  } else {
+    match = name.match(new RegExp(`^(\\d+(?:[.,]\\d+)?)\\s*(${UNIT_PATTERN})\\s+(.+)$`, 'i'));
+    if (match) {
+      qty = `${match[1].replace(',', '.')} ${normalizeUnit(match[2])}`;
+      name = match[3];
+    } else {
+      // "BAYAM 2 BKS", "TELUR 10 BUTIR", "SUSU UHT 1L"
+      match = name.match(new RegExp(`^(.+?)\\s+(\\d+(?:[.,]\\d+)?)\\s*(${UNIT_PATTERN})$`, 'i'));
+      if (match) {
+        name = match[1];
+        qty = `${match[2].replace(',', '.')} ${normalizeUnit(match[3])}`;
+      } else {
+        // "BAYAM x2"
+        match = name.match(/^(.+?)\s+[xX×]\s*(\d+)$/);
+        if (match) {
+          name = match[1];
+          qty = match[2];
+        }
+      }
+    }
+  }
+
+  name = name.replace(/\s{2,}/g, ' ').trim();
+  if (name.length < 3 || !/[A-Za-z]{2}/.test(name)) return null;
+
+  // Hindari item yang ternyata cuma label pembayaran.
+  if (looksLikeReceiptNoise(name)) return null;
+
+  // Pertahankan singkatan populer ketika OCR menulis semua huruf kapital.
+  if (name === name.toUpperCase()) {
+    name = name.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase())
+      .replace(/\bUht\b/g, 'UHT')
+      .replace(/\bAbc\b/g, 'ABC');
+  }
+
+  return { name, qty };
+}
+
+function parseReceiptText(text: string): ReceiptItem[] {
+  const rawLines = text.split(/\r?\n/).map(cleanLine).filter(Boolean);
+  const products: { name: string; qty: string }[] = [];
+  const seen = new Set<string>();
+
+  for (const line of rawLines) {
+    const parsed = parseProductLine(line);
+    if (!parsed) continue;
+    const key = `${parsed.name.toLowerCase()}|${parsed.qty.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    products.push(parsed);
+    if (products.length >= 20) break;
+  }
+
+  return products.map((product, index): ReceiptItem => ({
+    id: `ocr-${Date.now()}-${index}`,
+    name: product.name,
+    qty: product.qty, // kosong jika jumlah tidak terbaca; koreksi di Konfirmasi
+    category: detectCategory(product.name),
+    expiry: '', // struk umumnya tidak memuat tanggal kedaluwarsa
+    notes: '',
+    confirmed: true,
+  }));
 }
 
 export default function ScannerScreen() {
@@ -272,8 +306,7 @@ export default function ScannerScreen() {
       const result =
         await cameraRef.current.takePictureAsync(
           {
-            quality: 0.7,
-            base64: true,
+            quality: 0.85,
           }
         );
 
@@ -284,11 +317,7 @@ export default function ScannerScreen() {
         return;
       }
 
-      setPhoto({
-        uri: result.uri,
-        base64:
-          result.base64 || null,
-      });
+      setPhoto({ uri: result.uri });
 
       setCameraActive(false);
     } catch (error) {
@@ -323,23 +352,8 @@ export default function ScannerScreen() {
       setProcessingOCR(true);
       setErrorMessage('');
 
-      if (!photo.base64) {
-        setErrorMessage(
-          'Data foto tidak tersedia untuk OCR. Coba ambil foto ulang.'
-        );
-        return;
-      }
-
-      /*
-        OCR.Space butuh base64 image
-        dengan prefix data:image/...
-      */
-      const imageBase64 =
-        photo.base64.startsWith(
-          'data:image'
-        )
-          ? photo.base64
-          : `data:image/jpeg;base64,${photo.base64}`;
+      // Kompres otomatis agar foto tidak ditolak OCR.space (E556).
+      const imageBase64 = await compressPhotoForOCR(photo.uri);
 
       const {
         data,
@@ -360,8 +374,27 @@ export default function ScannerScreen() {
           error
         );
 
+        let serverMessage = '';
+        try {
+          // Supabase FunctionsHttpError menyediakan Response di context.
+          const context = (error as { context?: Response }).context;
+          if (context && typeof context.json === 'function') {
+            const payload = await context.json();
+            serverMessage = typeof payload?.error === 'string'
+              ? payload.error
+              : typeof payload?.message === 'string'
+                ? payload.message
+                : '';
+          }
+        } catch {
+          // Tetap tampilkan pesan umum jika respons tidak berbentuk JSON.
+        }
+
+        const isTooLarge = /E556|too large|1\.5\s*MB/i.test(serverMessage);
         setErrorMessage(
-          'OCR gagal membaca struk. Coba foto ulang dengan gambar yang lebih jelas.'
+          isTooLarge
+            ? 'Ukuran foto masih terlalu besar. Coba foto ulang dengan lebih dekat.'
+            : 'Layanan OCR gagal memproses foto. Periksa log receipt-ocr di Supabase.'
         );
 
         return;
@@ -393,11 +426,6 @@ export default function ScannerScreen() {
 
         return;
       }
-
-      console.log(
-        'OCR RAW TEXT:',
-        rawText
-      );
 
       const parsedItems =
         parseReceiptText(
@@ -439,7 +467,9 @@ export default function ScannerScreen() {
       );
 
       setErrorMessage(
-        'Terjadi kesalahan saat memproses struk.'
+        error instanceof Error
+          ? error.message
+          : 'Terjadi kesalahan saat memproses struk.'
       );
     } finally {
       setProcessingOCR(false);
@@ -604,8 +634,7 @@ export default function ScannerScreen() {
               ? 'Pastikan tulisan pada struk terlihat jelas sebelum diproses.'
               : 'Pastikan seluruh struk terlihat dan pencahayaan cukup terang.'}
           </Text>
-
-          <View
+<View
             style={
               styles.cameraContainer
             }

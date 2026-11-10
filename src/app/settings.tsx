@@ -34,16 +34,6 @@ export default function SettingsScreen() {
   const [householdId, setHouseholdId] =
     useState<string | null>(null);
 
-  // Fitur pemulihan khusus Owner.
-  const [isHouseholdOwner, setIsHouseholdOwner] =
-    useState(false);
-
-  const [recoveryCode, setRecoveryCode] =
-    useState('');
-
-  const [generatingRecoveryCode, setGeneratingRecoveryCode] =
-    useState(false);
-
   const [
     notificationEnabled,
     setNotificationEnabled,
@@ -190,27 +180,6 @@ export default function SettingsScreen() {
           setHouseholdId(householdId);
 
           if (householdId) {
-            // Cek role pengguna pada household aktif.
-            const {
-              data: ownerMembership,
-              error: ownerMembershipError,
-            } = await supabase
-              .from('household_members')
-              .select('role')
-              .eq('household_id', householdId)
-              .eq('user_id', user.id)
-              .maybeSingle();
-
-            if (ownerMembershipError) {
-              throw ownerMembershipError;
-            }
-
-            if (isMounted) {
-              setIsHouseholdOwner(
-                ownerMembership?.role === 'owner'
-              );
-            }
-
             const {
               data: household,
               error: householdError,
@@ -262,8 +231,6 @@ export default function SettingsScreen() {
           } else {
             setHouseholdName('');
             setPremiumEnabled(false);
-            setIsHouseholdOwner(false);
-            setRecoveryCode('');
           }
         } catch (error) {
           console.error(
@@ -453,59 +420,6 @@ export default function SettingsScreen() {
       );
     } finally {
       setPremiumSaving(false);
-    }
-  }
-
-  async function handleGenerateRecoveryCode() {
-    if (generatingRecoveryCode) {
-      return;
-    }
-
-    try {
-      setGeneratingRecoveryCode(true);
-      setErrorMessage('');
-
-      if (!householdId) {
-        throw new Error(
-          'Household tidak ditemukan. Silakan buka ulang Settings.'
-        );
-      }
-
-      // RPC akan memverifikasi kembali bahwa pemanggil adalah Owner.
-      const {
-        data,
-        error,
-      } = await supabase.rpc(
-        'generate_owner_recovery_code',
-        {
-          p_household_id: householdId,
-        }
-      );
-
-      if (error) {
-        throw error;
-      }
-
-      if (typeof data !== 'string' || !data.trim()) {
-        throw new Error(
-          'Recovery code tidak berhasil dibuat. Silakan coba lagi.'
-        );
-      }
-
-      setRecoveryCode(data);
-    } catch (error) {
-      console.error(
-        'Generate owner recovery code error:',
-        error
-      );
-
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : 'Gagal membuat Owner Recovery Code.'
-      );
-    } finally {
-      setGeneratingRecoveryCode(false);
     }
   }
 
@@ -702,12 +616,10 @@ export default function SettingsScreen() {
                     styles.menuSubtitle
                   }
                 >
-                  Lihat anggota dan kode
-                  undangan
+                  Lihat anggota, kode undangan, dan pemulihan Owner
                 </Text>
               </View>
-
-              <Text
+<Text
                 style={
                   styles.chevron
                 }
@@ -766,60 +678,6 @@ export default function SettingsScreen() {
               </Text>
             </Pressable>
           </View>
-
-          {isHouseholdOwner ? (
-            <>
-              <Text style={styles.sectionTitle}>
-                Pemulihan Owner
-              </Text>
-
-              <View style={styles.card}>
-                <View style={styles.recoveryContent}>
-                  <Text style={styles.menuTitle}>
-                    Owner Recovery Code
-                  </Text>
-
-                  <Text style={styles.menuSubtitle}>
-                    Buat kode pemulihan untuk membantu Owner
-                    mendapatkan kembali akses ke kulkas bersama.
-                  </Text>
-
-                  {recoveryCode ? (
-                    <View style={styles.recoveryCodeBox}>
-                      <Text style={styles.recoveryCodeText}>
-                        {recoveryCode}
-                      </Text>
-                    </View>
-                  ) : null}
-
-                  <Pressable
-                    style={[
-                      styles.recoveryButton,
-                      generatingRecoveryCode &&
-                        styles.logoutDisabled,
-                    ]}
-                    onPress={handleGenerateRecoveryCode}
-                    disabled={generatingRecoveryCode || !householdId}
-                  >
-                    {generatingRecoveryCode ? (
-                      <ActivityIndicator color="#FFFFFF" />
-                    ) : (
-                      <Text style={styles.recoveryButtonText}>
-                        {recoveryCode
-                          ? 'Buat Recovery Code Baru'
-                          : 'Generate Recovery Code'}
-                      </Text>
-                    )}
-                  </Pressable>
-
-                  <Text style={styles.recoveryHint}>
-                    Simpan kode ini di tempat yang aman. Jika membuat
-                    kode baru, kode sebelumnya tidak akan berlaku lagi.
-                  </Text>
-                </View>
-              </View>
-            </>
-          ) : null}
 
           <Text
             style={
@@ -1287,52 +1145,6 @@ const styles =
       paddingHorizontal: 13,
       flexDirection: 'row',
       alignItems: 'center',
-    },
-
-    recoveryContent: {
-      padding: 14,
-    },
-
-    recoveryCodeBox: {
-      backgroundColor: '#F1F6F2',
-      borderWidth: 1,
-      borderColor: '#DCE9DF',
-      borderRadius: 9,
-      paddingVertical: 13,
-      paddingHorizontal: 10,
-      marginTop: 13,
-      alignItems: 'center',
-    },
-
-    recoveryCodeText: {
-      fontSize: 14,
-      fontWeight: '700',
-      color: '#2F7556',
-      letterSpacing: 1,
-      textAlign: 'center',
-    },
-
-    recoveryButton: {
-      minHeight: 42,
-      borderRadius: 9,
-      backgroundColor: '#2F7556',
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingHorizontal: 12,
-      marginTop: 13,
-    },
-
-    recoveryButtonText: {
-      fontSize: 10,
-      fontWeight: '700',
-      color: '#FFFFFF',
-    },
-
-    recoveryHint: {
-      fontSize: 8.5,
-      lineHeight: 13,
-      color: '#858E87',
-      marginTop: 9,
     },
 
     errorBox: {

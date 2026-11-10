@@ -54,10 +54,7 @@ export default function JoinHouseholdScreen() {
       return;
     }
 
-    if (
-      joinMode === 'owner' &&
-      !cleanRecoveryCode
-    ) {
+    if (joinMode === 'owner' && !cleanRecoveryCode) {
       setErrorMessage('Masukkan kode pemulihan Owner.');
       return;
     }
@@ -124,9 +121,7 @@ export default function JoinHouseholdScreen() {
               'Invalid invite code'
             )
           ) {
-            setErrorMessage(
-              'Kode undangan tidak valid.'
-            );
+            setErrorMessage('Kode undangan tidak valid.');
           } else if (
             recoveryError.message.includes(
               'Invalid recovery code'
@@ -234,9 +229,7 @@ export default function JoinHouseholdScreen() {
     } catch (error) {
       console.error('Join household error:', error);
 
-      setErrorMessage(
-        'Terjadi kesalahan. Coba lagi.'
-      );
+      setErrorMessage('Terjadi kesalahan. Coba lagi.');
     } finally {
       setLoading(false);
     }
@@ -253,7 +246,13 @@ export default function JoinHouseholdScreen() {
           {/* BACK */}
           <Pressable
             style={styles.backButton}
-            onPress={() => router.back()}
+            onPress={() => {
+              if (router.canGoBack()) {
+                router.back();
+              } else {
+                router.replace('/');
+              }
+            }}
           >
             <Text style={styles.backText}>‹</Text>
           </Pressable>
@@ -422,6 +421,7 @@ export default function JoinHouseholdScreen() {
               </Text>
             </View>
 
+            {/* ERROR MESSAGE */}
             {errorMessage ? (
               <View style={styles.errorBox}>
                 <Text style={styles.errorText}>
@@ -435,8 +435,6 @@ export default function JoinHouseholdScreen() {
               style={[
                 styles.primaryButton,
                 loading && styles.buttonDisabled,
-                joinMode === 'owner' &&
-                  styles.ownerButton,
               ]}
               onPress={handleJoin}
               disabled={loading}
@@ -513,7 +511,7 @@ const styles = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 9,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#2F7556',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 9,
@@ -655,10 +653,6 @@ const styles = StyleSheet.create({
     borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-
-  ownerButton: {
-    backgroundColor: '#365D76',
   },
 
   primaryButtonText: {

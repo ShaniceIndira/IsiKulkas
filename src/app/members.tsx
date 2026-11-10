@@ -1,17 +1,12 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
-import {
-  router,
-  useFocusEffect,
-} from 'expo-router';
-import {
-  useCallback,
-  useState,
-} from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -32,31 +27,37 @@ type Member = {
 
 export default function MembersScreen() {
   const [loading, setLoading] = useState(true);
-
   const [householdName, setHouseholdName] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [members, setMembers] = useState<Member[]>([]);
-
   const [copied, setCopied] = useState(false);
+
+  const [recoveryCode, setRecoveryCode] = useState('');
   const [recoveryCopied, setRecoveryCopied] = useState(false);
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
+  const [recoveryError, setRecoveryError] = useState('');
 
   const [currentUserId, setCurrentUserId] = useState('');
   const [activeHouseholdId, setActiveHouseholdId] = useState('');
-
-  const [recoveryCode, setRecoveryCode] = useState('');
-  const [generatingRecovery, setGeneratingRecovery] = useState(false);
-
   const [removingUserId, setRemovingUserId] = useState('');
-
   const [errorMessage, setErrorMessage] = useState('');
 
   useFocusEffect(
     useCallback(() => {
-      loadHousehold();
+      void loadHousehold();
     }, [])
   );
 
-  // GET HOUSEHOLD ID
+  // PESAN UNTUK WEB, ANDROID, DAN IOS
+  function showMessage(title: string, message: string) {
+    if (Platform.OS === 'web') {
+      window.alert(`${title}\n\n${message}`);
+    } else {
+      Alert.alert(title, message);
+    }
+  }
+
+  // AMBIL HOUSEHOLD ID
   async function getHouseholdId(
     userId: string
   ): Promise<string | null> {
@@ -68,10 +69,7 @@ export default function MembersScreen() {
       return saved;
     }
 
-    const {
-      data: membership,
-      error,
-    } = await supabase
+    const { data: membership, error } = await supabase
       .from('household_members')
       .select('household_id')
       .eq('user_id', userId)
@@ -97,17 +95,15 @@ export default function MembersScreen() {
     return householdId;
   }
 
-  // LOAD HOUSEHOLD AND MEMBERS
+  // LOAD HOUSEHOLD DAN ANGGOTA
   async function loadHousehold() {
     try {
       setLoading(true);
       setErrorMessage('');
       setCopied(false);
-
-      // Recovery code hanya ditampilkan
-      // setelah berhasil dibuat pada sesi halaman ini.
       setRecoveryCode('');
       setRecoveryCopied(false);
+      setRecoveryError('');
 
       const {
         data: { user },
@@ -124,15 +120,12 @@ export default function MembersScreen() {
       const householdId = await getHouseholdId(user.id);
 
       if (!householdId) {
-        setErrorMessage(
-          'Kulkas aktif tidak ditemukan.'
-        );
+        setErrorMessage('Kulkas aktif tidak ditemukan.');
         return;
       }
 
       setActiveHouseholdId(householdId);
 
-      // Household information
       const {
         data: household,
         error: householdError,
@@ -156,7 +149,6 @@ export default function MembersScreen() {
         household?.invite_code || ''
       );
 
-      // Household members
       const {
         data: memberData,
         error: membersError,
@@ -173,8 +165,19 @@ export default function MembersScreen() {
         return;
       }
 
-      setMembers((memberData || []) as Member[]);
+      const loadedMembers = (memberData || []) as Member[];
+      setMembers(loadedMembers);
 
+      // KODE PEMULIHAN HANYA UNTUK OWNER
+      const isOwner = loadedMembers.some(
+        (member) =>
+          member.user_id === user.id &&
+          member.role === 'owner'
+      );
+
+      if (isOwner) {
+        await loadRecoveryCode(householdId);
+      }
     } catch (error) {
       console.error('Load members error:', error);
       setErrorMessage('Gagal memuat anggota.');
@@ -183,19 +186,16 @@ export default function MembersScreen() {
     }
   }
 
-  // CHECK OWNER STATUS
+  // STATUS OWNER
   const currentUserIsOwner = members.some(
     (member) =>
       member.user_id === currentUserId &&
       member.role === 'owner'
   );
 
-  // DISPLAY NAME
+  // NAMA ANGGOTA
   function getDisplayName(member: Member) {
-    if (
-      member.full_name &&
-      member.full_name.trim()
-    ) {
+    if (member.full_name && member.full_name.trim()) {
       return member.full_name;
     }
 
@@ -206,7 +206,7 @@ export default function MembersScreen() {
     return 'Anggota';
   }
 
-  // COPY INVITE CODE
+  // SALIN KODE UNDANGAN
   async function copyInviteCode() {
     if (!inviteCode) return;
 
@@ -217,132 +217,96 @@ export default function MembersScreen() {
       setTimeout(() => {
         setCopied(false);
       }, 1500);
-
     } catch (error) {
       console.error('Copy invite code error:', error);
+      showMessage(
+        'Gagal',
+        'Kode undangan tidak berhasil disalin.'
+      );
     }
   }
 
-  // GENERATE OWNER RECOVERY CODE
-  async function generateRecoveryCode() {
-    if (!activeHouseholdId || !currentUserIsOwner) {
-      Alert.alert(
-        'Tidak diizinkan',
-        'Hanya Owner yang dapat membuat Recovery Code.'
-      );
-      return;
-    }
+  // AMBIL KODE PEMULIHAN PERMANEN
+  async function loadRecoveryCode(householdId: string) {
+    if (!householdId) return;
 
     try {
-      setGeneratingRecovery(true);
-      setRecoveryCode('');
-      setRecoveryCopied(false);
+      setRecoveryLoading(true);
+      setRecoveryError('');
 
-      const {
-        data,
-        error,
-      } = await supabase.rpc(
+      const { data, error } = await supabase.rpc(
         'generate_owner_recovery_code',
         {
-          p_household_id: activeHouseholdId,
+          p_household_id: householdId,
         }
       );
 
       if (error) {
-        console.error(
-          'Generate recovery code error:',
-          error
-        );
-
-        Alert.alert(
-          'Gagal membuat Recovery Code',
-          error.message
-        );
-
-        return;
+        throw error;
       }
 
-      if (!data || typeof data !== 'string') {
-        Alert.alert(
-          'Gagal',
-          'Recovery Code tidak berhasil dibuat.'
+      if (typeof data !== 'string' || !data.trim()) {
+        throw new Error(
+          'Kode pemulihan tidak tersedia.'
         );
-        return;
       }
 
       setRecoveryCode(data);
-
-      Alert.alert(
-        'Recovery Code berhasil dibuat',
-        'Simpan kode ini di tempat yang aman. Kode hanya ditampilkan setelah dibuat dan diperlukan untuk memulihkan kepemilikan kulkas.'
-      );
-
     } catch (error) {
       console.error(
-        'Generate recovery code error:',
+        'Load owner recovery error:',
         error
       );
 
-      Alert.alert(
-        'Terjadi kesalahan',
-        'Gagal membuat Recovery Code. Coba lagi.'
+      setRecoveryCode('');
+      setRecoveryError(
+        error instanceof Error
+          ? error.message
+          : 'Gagal memuat kode pemulihan Owner.'
       );
-
     } finally {
-      setGeneratingRecovery(false);
+      setRecoveryLoading(false);
     }
   }
 
-  // CONFIRM GENERATING RECOVERY CODE
-  function confirmGenerateRecoveryCode() {
-    Alert.alert(
-      'Buat Recovery Code?',
-      'Jika sebelumnya sudah ada Recovery Code, kode lama akan digantikan dan tidak bisa digunakan lagi. Lanjutkan?',
-      [
-        {
-          text: 'Batal',
-          style: 'cancel',
-        },
-        {
-          text: 'Buat Kode',
-          onPress: () => {
-            void generateRecoveryCode();
-          },
-        },
-      ]
-    );
-  }
-
-  // COPY RECOVERY CODE
+  // SALIN KODE PEMULIHAN OWNER
   async function copyRecoveryCode() {
-    if (!recoveryCode) return;
+    if (!currentUserIsOwner || !recoveryCode) {
+      return;
+    }
 
     try {
       await Clipboard.setStringAsync(recoveryCode);
-
       setRecoveryCopied(true);
 
       setTimeout(() => {
         setRecoveryCopied(false);
       }, 1500);
-
     } catch (error) {
       console.error(
-        'Copy recovery code error:',
+        'Copy owner recovery error:',
         error
       );
 
-      Alert.alert(
+      showMessage(
         'Gagal',
-        'Recovery Code tidak berhasil disalin.'
+        'Kode pemulihan tidak berhasil disalin.'
       );
     }
   }
 
-  // REMOVE MEMBER
+  // HAPUS ANGGOTA DARI SUPABASE
   async function handleRemoveMember(member: Member) {
+    if (!currentUserIsOwner) {
+      showMessage(
+        'Tidak diizinkan',
+        'Hanya Owner yang dapat menghapus anggota.'
+      );
+      return;
+    }
+
     if (!activeHouseholdId) {
-      Alert.alert(
+      showMessage(
         'Gagal',
         'Kulkas aktif tidak ditemukan.'
       );
@@ -353,16 +317,19 @@ export default function MembersScreen() {
       member.role !== 'member' ||
       member.user_id === currentUserId
     ) {
-      Alert.alert(
+      showMessage(
         'Tidak dapat menghapus anggota',
-        'Hanya anggota dengan role Member yang dapat dikeluarkan.'
+        'Hanya pengguna dengan role Member yang dapat dikeluarkan.'
       );
       return;
     }
 
+    if (removingUserId) return;
+
     try {
       setRemovingUserId(member.user_id);
 
+      // PANGGIL RPC SUPABASE
       const { error } = await supabase.rpc(
         'remove_household_member',
         {
@@ -372,49 +339,87 @@ export default function MembersScreen() {
       );
 
       if (error) {
-        console.error('Remove member error:', error);
-
-        Alert.alert(
-          'Gagal mengeluarkan anggota',
-          error.message ||
-            'Terjadi kesalahan. Silakan coba lagi.'
-        );
-
-        return;
+        throw error;
       }
 
-      setMembers((currentMembers) =>
-        currentMembers.filter(
-          (currentMember) =>
-            currentMember.user_id !== member.user_id
-        )
+      // MUAT ULANG ANGGOTA DARI DATABASE
+      const {
+        data: updatedMembers,
+        error: reloadError,
+      } = await supabase.rpc(
+        'get_household_members',
+        {
+          target_household_id: activeHouseholdId,
+        }
       );
 
-      Alert.alert(
+      if (reloadError) {
+        console.warn(
+          'Reload members after removal:',
+          reloadError
+        );
+
+        setMembers((prev) =>
+          prev.filter(
+            (m) => m.user_id !== member.user_id
+          )
+        );
+      } else {
+        setMembers(
+          (updatedMembers || []) as Member[]
+        );
+      }
+
+      showMessage(
         'Berhasil',
         `${getDisplayName(member)} sudah dikeluarkan dari ${householdName}.`
       );
-
     } catch (error) {
-      console.error('Remove member error:', error);
-
-      Alert.alert(
-        'Gagal mengeluarkan anggota',
-        'Terjadi kesalahan. Silakan coba lagi.'
+      console.error(
+        'Remove member error:',
+        error
       );
 
+      showMessage(
+        'Gagal mengeluarkan anggota',
+        error instanceof Error
+          ? error.message
+          : 'Terjadi kesalahan. Silakan coba lagi.'
+      );
     } finally {
       setRemovingUserId('');
     }
   }
 
-  // CONFIRM REMOVE MEMBER
+  // KONFIRMASI HAPUS ANGGOTA
   function confirmRemoveMember(member: Member) {
+    if (!currentUserIsOwner || removingUserId) {
+      return;
+    }
+
     const displayName = getDisplayName(member);
 
+    const message =
+      `${displayName} akan dikeluarkan dari ${householdName}. ` +
+      'Anggota tersebut tidak lagi dapat mengakses kulkas bersama.';
+
+    // KONFIRMASI UNTUK LOCALHOST / WEB
+    if (Platform.OS === 'web') {
+      const confirmed = window.confirm(
+        `Keluarkan anggota?\n\n${message}`
+      );
+
+      if (confirmed) {
+        void handleRemoveMember(member);
+      }
+
+      return;
+    }
+
+    // KONFIRMASI UNTUK ANDROID / IOS
     Alert.alert(
       'Keluarkan anggota?',
-      `${displayName} akan dikeluarkan dari ${householdName}. Anggota tersebut tidak lagi dapat mengakses kulkas bersama.`,
+      message,
       [
         {
           text: 'Batal',
@@ -438,7 +443,6 @@ export default function MembersScreen() {
           contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
         >
-
           {/* HEADER */}
           <View style={styles.header}>
             <Pressable
@@ -451,9 +455,7 @@ export default function MembersScreen() {
                 }
               }}
             >
-              <Text style={styles.backText}>
-                ‹
-              </Text>
+              <Text style={styles.backText}>‹</Text>
             </Pressable>
 
             <Text style={styles.title}>
@@ -473,7 +475,6 @@ export default function MembersScreen() {
             </View>
           ) : (
             <>
-
               {/* ERROR */}
               {errorMessage ? (
                 <View style={styles.errorBox}>
@@ -494,7 +495,7 @@ export default function MembersScreen() {
                 </Text>
               </View>
 
-              {/* INVITATION CODE */}
+              {/* KODE UNDANGAN */}
               <Text style={styles.sectionTitle}>
                 Undang anggota
               </Text>
@@ -504,12 +505,16 @@ export default function MembersScreen() {
                   Kode undangan
                 </Text>
 
-                <Text style={styles.inviteCode}>
+                <Text
+                  style={styles.inviteCode}
+                  selectable
+                >
                   {inviteCode || '-'}
                 </Text>
 
                 <Text style={styles.inviteHelp}>
-                  Kirim kode ini ke orang yang ingin kamu ajak mengelola kulkas.
+                  Kirim kode ini ke orang yang ingin kamu
+                  ajak mengelola kulkas.
                 </Text>
 
                 <Pressable
@@ -517,93 +522,96 @@ export default function MembersScreen() {
                   onPress={copyInviteCode}
                 >
                   <Text style={styles.copyButtonText}>
-                    {copied ? '✓ Disalin' : 'Salin Kode'}
+                    {copied
+                      ? '✓ Disalin'
+                      : 'Salin Kode'}
                   </Text>
                 </Pressable>
               </View>
 
-              {/* OWNER RECOVERY CODE */}
-              {currentUserIsOwner && (
+              {/* KODE PEMULIHAN OWNER */}
+              {currentUserIsOwner ? (
                 <>
                   <Text style={styles.sectionTitle}>
                     Pemulihan Owner
                   </Text>
 
                   <View style={styles.recoveryCard}>
-                    <View style={styles.recoveryIcon}>
-                      <Text style={styles.recoveryIconText}>
-                        🔐
-                      </Text>
-                    </View>
-
-                    <Text style={styles.recoveryTitle}>
-                      Recovery Code
+                    <Text style={styles.recoveryLabel}>
+                      Kode pemulihan Owner
                     </Text>
 
-                    <Text style={styles.recoveryDescription}>
-                      Buat kode pemulihan untuk mengembalikan kepemilikan kulkas jika kamu perlu masuk kembali sebagai Owner.
-                    </Text>
+                    {recoveryLoading ? (
+                      <View style={styles.recoveryLoadingRow}>
+                        <ActivityIndicator
+                          color="#2F7556"
+                          size="small"
+                        />
 
-                    {recoveryCode ? (
+                        <Text style={styles.recoveryHelp}>
+                          Memuat kode pemulihan...
+                        </Text>
+                      </View>
+                    ) : recoveryCode ? (
                       <>
-                        <View style={styles.recoveryCodeBox}>
-                          <Text
-                            selectable
-                            style={styles.recoveryCodeText}
-                          >
-                            {recoveryCode}
-                          </Text>
-                        </View>
-
-                        <Pressable
-                          style={styles.recoveryButton}
-                          onPress={copyRecoveryCode}
+                        <Text
+                          style={[
+                            styles.recoveryHidden,
+                            styles.recoveryVisible,
+                          ]}
+                          selectable
                         >
-                          <Text style={styles.recoveryButtonText}>
-                            {recoveryCopied
-                              ? '✓ Recovery Code Disalin'
-                              : 'Salin Recovery Code'}
-                          </Text>
-                        </Pressable>
+                          {recoveryCode}
+                        </Text>
 
-                        <Text style={styles.recoveryWarning}>
-                          Simpan kode ini sekarang. Jangan bagikan kepada orang lain.
+                        <Text style={styles.recoveryHelp}>
+                          Kode ini tetap sama setiap kali
+                          halaman dibuka. Simpan secara
+                          rahasia karena dapat digunakan
+                          untuk memulihkan kepemilikan
+                          kulkas.
                         </Text>
 
                         <Pressable
-                          style={styles.newRecoveryButton}
-                          onPress={confirmGenerateRecoveryCode}
-                          disabled={generatingRecovery}
+                          style={styles.recoveryManageButton}
+                          onPress={() => {
+                            void copyRecoveryCode();
+                          }}
                         >
-                          <Text style={styles.newRecoveryText}>
-                            Buat Recovery Code Baru
+                          <Text style={styles.recoveryManageText}>
+                            {recoveryCopied
+                              ? '✓ Disalin'
+                              : 'Salin Kode'}
                           </Text>
                         </Pressable>
                       </>
                     ) : (
-                      <Pressable
-                        style={[
-                          styles.recoveryButton,
-                          generatingRecovery &&
-                            styles.disabledButton,
-                        ]}
-                        onPress={confirmGenerateRecoveryCode}
-                        disabled={generatingRecovery}
-                      >
-                        {generatingRecovery ? (
-                          <ActivityIndicator color="#FFFFFF" />
-                        ) : (
-                          <Text style={styles.recoveryButtonText}>
-                            Buat Recovery Code →
+                      <>
+                        <Text style={styles.recoveryHelp}>
+                          {recoveryError ||
+                            'Kode pemulihan belum tersedia.'}
+                        </Text>
+
+                        <Pressable
+                          style={styles.recoveryManageButton}
+                          onPress={() => {
+                            void loadRecoveryCode(
+                              activeHouseholdId
+                            );
+                          }}
+                          disabled={!activeHouseholdId}
+                        >
+                          <Text style={styles.recoveryManageText}>
+                            Coba Muat Ulang
                           </Text>
-                        )}
-                      </Pressable>
+                        </Pressable>
+                      </>
                     )}
                   </View>
                 </>
-              )}
+              ) : null}
 
-              {/* MEMBERS LIST */}
+              {/* DAFTAR ANGGOTA */}
               <View style={styles.sectionHeader}>
                 <Text style={styles.sectionTitle}>
                   Anggota kulkas
@@ -615,7 +623,8 @@ export default function MembersScreen() {
               </View>
 
               {members.map((member) => {
-                const displayName = getDisplayName(member);
+                const displayName =
+                  getDisplayName(member);
 
                 return (
                   <View
@@ -624,7 +633,9 @@ export default function MembersScreen() {
                   >
                     <View style={styles.avatar}>
                       <Text style={styles.avatarText}>
-                        {displayName.charAt(0).toUpperCase()}
+                        {displayName
+                          .charAt(0)
+                          .toUpperCase()}
                       </Text>
                     </View>
 
@@ -665,7 +676,7 @@ export default function MembersScreen() {
                       </Text>
                     </View>
 
-                    {/* REMOVE MEMBER */}
+                    {/* TOMBOL HAPUS */}
                     {currentUserIsOwner &&
                     member.role === 'member' &&
                     member.user_id !== currentUserId ? (
@@ -675,7 +686,9 @@ export default function MembersScreen() {
                           removingUserId === member.user_id &&
                             styles.removeButtonDisabled,
                         ]}
-                        onPress={() => confirmRemoveMember(member)}
+                        onPress={() => {
+                          confirmRemoveMember(member);
+                        }}
                         disabled={removingUserId !== ''}
                       >
                         {removingUserId === member.user_id ? (
@@ -694,17 +707,17 @@ export default function MembersScreen() {
                 );
               })}
 
-              {/* INFORMATION */}
+              {/* INFORMASI */}
               <View style={styles.infoCard}>
                 <Text style={styles.infoTitle}>
                   Semua tersinkron
                 </Text>
 
                 <Text style={styles.infoText}>
-                  Anggota dalam kulkas yang sama dapat melihat dan mengelola isi kulkas bersama.
+                  Anggota dalam kulkas yang sama dapat
+                  melihat dan mengelola isi kulkas bersama.
                 </Text>
               </View>
-
             </>
           )}
         </ScrollView>
@@ -861,7 +874,14 @@ const styles = StyleSheet.create({
     color: '#2F7556',
   },
 
-  // RECOVERY CODE STYLES
+  // RECOVERY CODE
+  recoveryLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+
   recoveryCard: {
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
@@ -872,87 +892,44 @@ const styles = StyleSheet.create({
     marginBottom: 26,
   },
 
-  recoveryIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
-    backgroundColor: '#E7F2EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-
-  recoveryIconText: {
-    fontSize: 20,
-  },
-
-  recoveryTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#252A25',
-  },
-
-  recoveryDescription: {
+  recoveryLabel: {
     fontSize: 10,
-    lineHeight: 16,
-    color: '#858C86',
-    marginTop: 6,
-    marginBottom: 14,
+    color: '#8A918B',
   },
 
-  recoveryCodeBox: {
-    backgroundColor: '#F0F6F2',
-    borderWidth: 1,
-    borderColor: '#DCE9DF',
-    borderRadius: 10,
-    padding: 15,
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-
-  recoveryCodeText: {
-    fontSize: 17,
+  recoveryHidden: {
+    fontSize: 22,
     fontWeight: '800',
     color: '#2F7556',
     letterSpacing: 1,
-    textAlign: 'center',
+    marginTop: 5,
   },
 
-  recoveryButton: {
-    height: 46,
-    backgroundColor: '#2F7556',
-    borderRadius: 10,
+  recoveryVisible: {
+    fontSize: 16,
+    letterSpacing: 0.5,
+  },
+
+  recoveryHelp: {
+    fontSize: 10,
+    lineHeight: 16,
+    color: '#8A918B',
+    marginTop: 7,
+    marginBottom: 14,
+  },
+
+  recoveryManageButton: {
+    height: 44,
+    borderRadius: 9,
+    backgroundColor: '#E7F2EB',
     alignItems: 'center',
     justifyContent: 'center',
   },
 
-  recoveryButtonText: {
+  recoveryManageText: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#FFFFFF',
-  },
-
-  recoveryWarning: {
-    fontSize: 10,
-    lineHeight: 15,
-    color: '#A16B36',
-    marginTop: 10,
-  },
-
-  newRecoveryButton: {
-    marginTop: 14,
-    alignItems: 'center',
-    paddingVertical: 8,
-  },
-
-  newRecoveryText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#6F786F',
-  },
-
-  disabledButton: {
-    opacity: 0.6,
+    color: '#2F7556',
   },
 
   // MEMBERS
@@ -1028,6 +1005,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#EEF0EE',
   },
 
+  roleText: {
+    fontSize: 9,
+    fontWeight: '700',
+  },
+
+  ownerText: {
+    color: '#2F7556',
+  },
+
+  memberText: {
+    color: '#6F776F',
+  },
+
+  // REMOVE BUTTON
   removeButton: {
     minWidth: 58,
     height: 30,
@@ -1047,19 +1038,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     color: '#B95242',
-  },
-
-  roleText: {
-    fontSize: 9,
-    fontWeight: '700',
-  },
-
-  ownerText: {
-    color: '#2F7556',
-  },
-
-  memberText: {
-    color: '#6F776F',
   },
 
   infoCard: {
