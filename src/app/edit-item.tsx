@@ -118,6 +118,11 @@ export default function EditItemScreen() {
   ] = useState('');
 
   const [
+    stockGrams,
+    setStockGrams,
+  ] = useState('');
+
+  const [
     category,
     setCategory,
   ] = useState('Lainnya');
@@ -176,6 +181,7 @@ export default function EditItemScreen() {
           name,
           quantity,
           category,
+          stock_grams,
           expiry_date,
           notes
         `
@@ -210,6 +216,13 @@ export default function EditItemScreen() {
 
       setQuantity(
         data.quantity || ''
+      );
+
+      setStockGrams(
+        data.stock_grams !== null &&
+        data.stock_grams !== undefined
+          ? String(data.stock_grams)
+          : ''
       );
 
       setCategory(
@@ -270,6 +283,42 @@ export default function EditItemScreen() {
       return;
     }
 
+    const isGramCategory =
+      category === 'Daging' ||
+      category === 'Sayur';
+
+    let stockGramsValue: number | null = null;
+
+    if (isGramCategory) {
+      const trimmedStockGrams =
+        stockGrams.trim();
+
+      if (!trimmedStockGrams) {
+        setErrorMessage(
+          'Berat stok harus diisi untuk kategori Daging dan Sayur.'
+        );
+
+        return;
+      }
+
+      const parsedStockGrams =
+        Number(trimmedStockGrams);
+
+      if (
+        !Number.isSafeInteger(parsedStockGrams) ||
+        parsedStockGrams < 0
+      ) {
+        setErrorMessage(
+          'Berat stok harus berupa angka bulat 0 atau lebih.'
+        );
+
+        return;
+      }
+
+      stockGramsValue =
+        parsedStockGrams;
+    }
+
     try {
       setSaving(true);
       setErrorMessage('');
@@ -288,6 +337,9 @@ export default function EditItemScreen() {
           category:
             category ||
             'Lainnya',
+
+          stock_grams:
+            stockGramsValue,
 
           expiry_date:
             expiryDate ||
@@ -588,6 +640,38 @@ export default function EditItemScreen() {
             </View>
           </View>
 
+          {category === 'Daging' ||
+          category === 'Sayur' ? (
+            <View
+              style={styles.field}
+            >
+              <Text
+                style={styles.label}
+              >
+                Sisa stok (gram)
+              </Text>
+
+              <TextInput
+                value={stockGrams}
+                onChangeText={(value) =>
+                  setStockGrams(
+                    value.replace(/[^0-9]/g, '')
+                  )
+                }
+                placeholder="Contoh: 1000"
+                placeholderTextColor="#A4AAA5"
+                style={styles.input}
+                keyboardType="number-pad"
+              />
+
+              <Text
+                style={styles.helperText}
+              >
+                Masukkan angka dalam gram. Contoh: 1000 untuk 1 kg.
+              </Text>
+            </View>
+          ) : null}
+
           <View
             style={styles.field}
           >
@@ -836,6 +920,13 @@ const styles =
       color: '#252A25',
       outlineStyle: 'none',
     } as any,
+
+    helperText: {
+      fontSize: 10,
+      lineHeight: 15,
+      color: '#8A938B',
+      marginTop: 6,
+    },
 
     notesInput: {
       minHeight: 100,

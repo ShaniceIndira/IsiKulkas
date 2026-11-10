@@ -2,13 +2,14 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { router } from 'expo-router';
 import { useState } from 'react';
 import {
-    Platform,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  Alert,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -25,6 +26,17 @@ export default function ManualAddScreen() {
   const [name, setName] = useState('');
   const [category, setCategory] = useState('');
   const [quantity, setQuantity] = useState('');
+  const [stockGrams, setStockGrams] = useState('');
+
+  const isGramCategory =
+    category === 'Daging' || category === 'Sayur';
+
+  const stockGramsIsValid =
+    !isGramCategory ||
+    (
+      /^\d+$/.test(stockGrams.trim()) &&
+      Number.isSafeInteger(Number(stockGrams.trim()))
+    );
 
   const [expiryDate, setExpiryDate] = useState('');
   const [expiryDisplay, setExpiryDisplay] = useState('');
@@ -36,7 +48,8 @@ export default function ManualAddScreen() {
   const canSubmit =
     name.trim() !== '' &&
     category.trim() !== '' &&
-    quantity.trim() !== '';
+    quantity.trim() !== '' &&
+    stockGramsIsValid;
 
   function formatDateForDisplay(date: Date) {
     return date.toLocaleDateString('en-GB', {
@@ -83,12 +96,34 @@ export default function ManualAddScreen() {
   function handleAdd() {
     if (!canSubmit) return;
 
+    if (isGramCategory) {
+      const parsedStock = Number(stockGrams.trim());
+
+      if (
+        !/^\d+$/.test(stockGrams.trim()) ||
+        !Number.isSafeInteger(parsedStock)
+      ) {
+        if (Platform.OS === 'web') {
+          window.alert('Berat stok harus berupa angka bulat gram, misalnya 285.');
+        } else {
+          Alert.alert(
+            'Berat stok tidak valid',
+            'Masukkan berat dalam angka bulat gram, misalnya 285.'
+          );
+        }
+        return;
+      }
+    }
+
     router.push({
       pathname: '/confirmation',
       params: {
         manualName: name,
         manualCategory: category,
         manualQuantity: quantity,
+        manualStockGrams: isGramCategory
+          ? stockGrams.trim()
+          : '',
         manualExpiry: expiryDate,
         manualNotes: notes,
       },
@@ -175,7 +210,12 @@ export default function ManualAddScreen() {
                       category === item &&
                         styles.categoryChipActive,
                     ]}
-                    onPress={() => setCategory(item)}
+                    onPress={() => {
+                      setCategory(item);
+                      if (item !== 'Daging' && item !== 'Sayur') {
+                        setStockGrams('');
+                      }
+                    }}
                   >
                     <Text
                       style={[
@@ -211,6 +251,40 @@ export default function ManualAddScreen() {
                 />
               </View>
             </View>
+
+            {/* BERAT / STOK DALAM GRAM - KHUSUS DAGING & SAYUR */}
+            {isGramCategory ? (
+              <View style={styles.fieldCard}>
+                <View style={styles.iconCircleGreen}>
+                  <Text style={styles.iconText}>⚖</Text>
+                </View>
+
+                <View style={styles.fieldContent}>
+                  <Text style={styles.fieldLabel}>
+                    Berat / Stok (gram)
+                  </Text>
+
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Contoh: 285"
+                    placeholderTextColor="#A4AAA5"
+                    value={stockGrams}
+                    onChangeText={setStockGrams}
+                    keyboardType="number-pad"
+                  />
+
+                  {stockGrams.trim() && !stockGramsIsValid ? (
+                    <Text style={styles.stockErrorText}>
+                      Masukkan angka bulat tanpa desimal atau tanda minus.
+                    </Text>
+                  ) : (
+                    <Text style={styles.dateHint}>
+                      Masukkan berat total dalam gram, misalnya 285.
+                    </Text>
+                  )}
+                </View>
+              </View>
+            ) : null}
 
             {/* TANGGAL */}
             {Platform.OS === 'web' ? (
@@ -322,6 +396,12 @@ export default function ManualAddScreen() {
                   {quantity || 'Jumlah belum diisi'}
                   {category ? ` • ${category}` : ''}
                 </Text>
+
+                {isGramCategory && stockGrams.trim() ? (
+                  <Text style={styles.previewText}>
+                    Stok: {stockGrams} gram
+                  </Text>
+                ) : null}
 
                 {expiryDisplay ? (
                   <Text style={styles.previewText}>
@@ -564,6 +644,12 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#7E857F',
     marginTop: 3,
+  },
+
+  stockErrorText: {
+    fontSize: 10,
+    color: '#C45546',
+    marginTop: 4,
   },
 
   notesInput: {

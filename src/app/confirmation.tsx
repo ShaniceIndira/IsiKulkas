@@ -17,6 +17,7 @@ type FoodItem = {
   id: string;
   name: string;
   qty: string;
+  stock_grams?: number | null;
   category?: string;
   expiry?: string;
   notes?: string;
@@ -93,7 +94,25 @@ type EditForm = {
   category: string;
   expiry: string;
   notes: string;
+  stockGrams: string;
 };
+
+function supportsGramStock(category?: string) {
+  return category === 'Daging' || category === 'Sayur';
+}
+
+function parseStockGrams(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+
+  return null;
+}
 
 function normalizeOCRItem(value: unknown, index: number): FoodItem | null {
   if (!value || typeof value !== 'object') return null;
@@ -113,6 +132,9 @@ function normalizeOCRItem(value: unknown, index: number): FoodItem | null {
       : `ocr-${Date.now()}-${index}`,
     name,
     qty: typeof input.qty === 'string' ? input.qty.trim() : '',
+    stock_grams: supportsGramStock(category)
+      ? parseStockGrams(input.stock_grams ?? input.stockGrams)
+      : null,
     category,
     expiry: typeof input.expiry === 'string' ? input.expiry : '',
     notes: typeof input.notes === 'string' ? input.notes : '',
@@ -139,13 +161,14 @@ export default function ConfirmationScreen() {
     manualQuantity?: string;
     manualExpiry?: string;
     manualNotes?: string;
+    manualStockGrams?: string;
   }>();
 
   const [items, setItems] = useState<FoodItem[]>([]);
   const lastProcessedScan = useRef<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<EditForm>({
-    name: '', qty: '', category: 'Lainnya', expiry: '', notes: '',
+    name: '', qty: '', category: 'Lainnya', expiry: '', notes: '', stockGrams: '',
   });
 
   // Scanner mengirim items sebagai JSON melalui router.push().
@@ -175,6 +198,7 @@ export default function ConfirmationScreen() {
     const manualQuantity = params.manualQuantity;
     const manualExpiry = params.manualExpiry;
     const manualNotes = params.manualNotes;
+    const manualStockGrams = params.manualStockGrams;
 
     if (!manualName || !manualQuantity) return;
 
@@ -191,6 +215,9 @@ export default function ConfirmationScreen() {
         id: `manual-${Date.now()}-${Math.random()}`,
         name: manualName,
         qty: manualQuantity,
+        stock_grams: supportsGramStock(manualCategory)
+          ? parseStockGrams(manualStockGrams ?? null)
+          : null,
         category: manualCategory,
         expiry: manualExpiry,
         notes: manualNotes,
@@ -206,6 +233,7 @@ export default function ConfirmationScreen() {
     params.manualQuantity,
     params.manualExpiry,
     params.manualNotes,
+    params.manualStockGrams,
   ]);
 
   function toggleConfirmed(id: string) {
@@ -228,6 +256,9 @@ export default function ConfirmationScreen() {
       category: item.category || 'Lainnya',
       expiry: item.expiry || '',
       notes: item.notes || '',
+      stockGrams: item.stock_grams === null || item.stock_grams === undefined
+        ? ''
+        : String(item.stock_grams),
     });
   }
 
@@ -237,6 +268,14 @@ export default function ConfirmationScreen() {
       showNotice('Data belum lengkap', 'Nama bahan dan jumlah wajib diisi.');
       return;
     }
+    const stockGramsText = editForm.stockGrams.trim();
+    if (supportsGramStock(editForm.category) && stockGramsText) {
+      if (!/^\d+$/.test(stockGramsText) || !Number.isSafeInteger(Number(stockGramsText))) {
+        showNotice('Berat stok tidak valid', 'Masukkan berat dalam angka bulat gram, misalnya 500.');
+        return;
+      }
+    }
+
     const expiry = editForm.expiry.trim();
     if (expiry && !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
       showNotice('Format tanggal salah', 'Gunakan format YYYY-MM-DD, misalnya 2026-11-15.');
@@ -250,6 +289,9 @@ export default function ConfirmationScreen() {
               ...item,
               name: editForm.name.trim(),
               qty: editForm.qty.trim(),
+              stock_grams: supportsGramStock(editForm.category) && stockGramsText
+                ? Number(stockGramsText)
+                : null,
               category: editForm.category,
               expiry,
               notes: editForm.notes.trim(),
@@ -394,6 +436,10 @@ export default function ConfirmationScreen() {
                       ? ` • ${item.category}`
                       : ''}
                   </Text>
+
+                  {supportsGramStock(item.category) && item.stock_grams !== null && item.stock_grams !== undefined ? (
+                    <Text style={styles.stockText}>Stok: {item.stock_grams} gram</Text>
+                  ) : null}
 
                   {item.expiry ? (
                     <Text
@@ -580,6 +626,22 @@ export default function ConfirmationScreen() {
                     </Pressable>
                   ))}
                 </View>
+
+                {supportsGramStock(editForm.category) ? (
+                  <>
+                    <Text style={styles.fieldLabel}>Berat / Stok (gram)</Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={editForm.stockGrams}
+                      onChangeText={(stockGrams) =>
+                        setEditForm((old) => ({ ...old, stockGrams }))
+                      }
+                      placeholder="Contoh: 500"
+                      keyboardType="numeric"
+                    />
+                    <Text style={styles.stockHint}>Masukkan berat total bahan dalam gram. Kosongkan jika belum ingin mencatat stok.</Text>
+                  </>
+                ) : null}
 
                 <Text style={styles.fieldLabel}>Tanggal kedaluwarsa (opsional)</Text>
                 <TextInput
@@ -787,6 +849,13 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
+  stockText: {
+    fontSize: 10,
+    color: '#2F7556',
+    fontWeight: '600',
+    marginTop: 4,
+  },
+
   notesText: {
     fontSize: 10,
     color: '#929993',
@@ -981,6 +1050,13 @@ const styles = StyleSheet.create({
   notesInput: {
     minHeight: 65,
     textAlignVertical: 'top',
+  },
+  stockHint: {
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#89928B',
+    marginTop: -8,
+    marginBottom: 14,
   },
   categoryRow: {
     flexDirection: 'row',

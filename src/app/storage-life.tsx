@@ -21,10 +21,15 @@ type FoodItem = {
   category?: string;
   expiry?: string;
   notes?: string;
+  stock_grams?: number | null;
   confirmed?: boolean;
   color?: string;
   icon?: string;
 };
+
+function supportsGramStock(category?: string) {
+  return category === 'Daging' || category === 'Sayur';
+}
 
 function parseISODate(value?: string) {
   if (!value) return null;
@@ -295,6 +300,33 @@ export default function StorageLifeScreen() {
         return;
       }
 
+      // Pastikan nilai stok gram valid sebelum dikirim ke Supabase.
+      const invalidStockItem =
+        confirmedItems.find((item) => {
+          if (!supportsGramStock(item.category)) {
+            return false;
+          }
+
+          if (
+            item.stock_grams === null ||
+            item.stock_grams === undefined
+          ) {
+            return false;
+          }
+
+          return (
+            !Number.isSafeInteger(item.stock_grams) ||
+            item.stock_grams < 0
+          );
+        });
+
+      if (invalidStockItem) {
+        setErrorMessage(
+          `Berat stok ${invalidStockItem.name} tidak valid. Masukkan angka bulat gram tanpa desimal atau angka negatif.`
+        );
+        return;
+      }
+
       const rows =
         confirmedItems.map(
           (item) => ({
@@ -314,6 +346,13 @@ export default function StorageLifeScreen() {
             category:
               item.category ||
               'Lainnya',
+
+            // Stok gram hanya berlaku untuk Daging dan Sayur.
+            // Kategori lain disimpan sebagai NULL.
+            stock_grams:
+              supportsGramStock(item.category)
+                ? item.stock_grams ?? null
+                : null,
 
             expiry_date:
               item.expiry ||
@@ -563,6 +602,14 @@ export default function StorageLifeScreen() {
                           {item.qty ||
                             'Jumlah belum diisi'}
                         </Text>
+
+                        {supportsGramStock(item.category) &&
+                        item.stock_grams !== null &&
+                        item.stock_grams !== undefined ? (
+                          <Text style={styles.stockMeta}>
+                            Stok: {item.stock_grams} gram
+                          </Text>
+                        ) : null}
                       </View>
                     </View>
 
@@ -825,6 +872,13 @@ const styles =
     itemMeta: {
       fontSize: 10,
       color: '#8A918B',
+      marginTop: 4,
+    },
+
+    stockMeta: {
+      fontSize: 10,
+      color: '#2F7556',
+      fontWeight: '600',
       marginTop: 4,
     },
 

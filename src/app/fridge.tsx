@@ -16,6 +16,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -41,6 +42,19 @@ type FridgeItem = {
     | 'discarded';
   used_at?: string | null;
   created_at?: string | null;
+  stock_grams?: number | null;
+};
+
+type StockUsageHistoryItem = {
+  id: string;
+  item_name: string;
+  category: string;
+  grams_used: number;
+  stock_before_grams: number;
+  stock_after_grams: number;
+  used_by: string;
+  created_at: string;
+  user_name: string;
 };
 
 type ConfirmAction =
@@ -57,6 +71,44 @@ const categories = [
   'Cairan',
   'Lainnya',
 ];
+
+function supportsGramStock(
+  category?: string | null
+) {
+  return (
+    category === 'Daging' ||
+    category === 'Sayur'
+  );
+}
+
+function getInitials(name?: string) {
+  if (!name?.trim()) {
+    return '?';
+  }
+
+  return name
+    .trim()
+    .split(/\\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || '')
+    .join('');
+}
+
+function formatUsageDateTime(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Waktu tidak tersedia';
+  }
+
+  return date.toLocaleString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
 
 function getCategoryIcon(
   category?: string | null
@@ -219,6 +271,36 @@ export default function FridgeScreen() {
     setActionLoading,
   ] = useState(false);
 
+  const [
+    usageModalVisible,
+    setUsageModalVisible,
+  ] = useState(false);
+
+  const [
+    usageItem,
+    setUsageItem,
+  ] = useState<FridgeItem | null>(null);
+
+  const [
+    usageGrams,
+    setUsageGrams,
+  ] = useState('');
+
+  const [
+    usageLoading,
+    setUsageLoading,
+  ] = useState(false);
+
+  const [
+    usageError,
+    setUsageError,
+  ] = useState('');
+
+  const [
+    usageHistory,
+    setUsageHistory,
+  ] = useState<StockUsageHistoryItem[]>([]);
+
   useFocusEffect(
     useCallback(() => {
       let isMounted = true;
@@ -280,6 +362,11 @@ export default function FridgeScreen() {
             isMounted
           );
 
+          await loadStockHistory(
+            householdId,
+            isMounted
+          );
+
           if (!isMounted) {
             return;
           }
@@ -304,11 +391,17 @@ export default function FridgeScreen() {
                     householdIdRef.current ===
                     householdId
                   ) {
-                    await loadItems(
-                      householdId,
-                      true,
-                      false
-                    );
+                    await Promise.all([
+                      loadItems(
+                        householdId,
+                        true,
+                        false
+                      ),
+                      loadStockHistory(
+                        householdId,
+                        true
+                      ),
+                    ]);
                   }
                 }
               )
@@ -458,6 +551,216 @@ export default function FridgeScreen() {
       ) {
         setLoading(false);
       }
+    }
+  }
+
+  async function loadStockHistory(
+    householdId: string,
+    shouldUpdate = true
+  ) {
+    try {
+      const {
+        data,
+        error,
+      } = await supabase
+        .from('stock_usage_history')
+        .select(
+          'id, item_name, category, grams_used, stock_before_grams, stock_after_grams, used_by, created_at'
+        )
+        .eq('household_id', householdId)
+        .order('created_at', {
+          ascending: false,
+        })
+        .limit(20);
+
+      if (error) {
+        console.error(
+          'Load stock history error:',
+          error
+        );
+
+        if (shouldUpdate) {
+          setUsageHistory([]);
+        }
+
+        return;
+      }
+
+      const records = data || [];
+      const userIds = Array.from(
+        new Set(
+          records
+            .map((record) => record.used_by)
+            .filter(Boolean)
+        )
+      );
+
+      let profileNames: Record<string, string> = {};
+
+      if (userIds.length > 0) {
+        const {
+          data: profiles,
+          error: profileError,
+        } = await supabase
+          .from('profiles')
+          .select('id, full_name')
+          .in('id', userIds);
+
+        if (profileError) {
+          console.error(
+            'Load profile names error:',
+            profileError
+          );
+        } else {
+          profileNames = Object.fromEntries(
+            (profiles || []).map((profile) => [
+              profile.id,
+              profile.full_name || 'Anggota',
+            ])
+          );
+        }
+      }
+
+      if (shouldUpdate) {
+        setUsageHistory(
+          records.map((record) => ({
+            ...record,
+            user_name:
+              profileNames[record.used_by] ||
+              'Anggota',
+          })) as StockUsageHistoryItem[]
+        );
+      }
+    } catch (error) {
+      console.error(
+        'Load stock history error:',
+        error
+      );
+
+      if (shouldUpdate) {
+        setUsageHistory([]);
+      }
+    }
+  }
+
+  function openUsageModal(item: FridgeItem) {
+    if (
+      item.stock_grams === null ||
+      item.stock_grams === undefined
+    ) {
+      router.push({
+        pathname: '/edit-item',
+        params: { id: item.id },
+      });
+      return;
+    }
+
+    setUsageItem(item);
+    setUsageGrams('');
+    setUsageError('');
+    setUsageModalVisible(true);
+  }
+
+  function closeUsageModal() {
+    if (usageLoading) {
+      return;
+    }
+
+    setUsageModalVisible(false);
+    setUsageItem(null);
+    setUsageGrams('');
+    setUsageError('');
+  }
+
+  async function handleUseGrams() {
+    if (!usageItem || usageLoading) {
+      return;
+    }
+
+    const grams = Number(usageGrams);
+
+    if (
+      !usageGrams.trim() ||
+      !Number.isSafeInteger(grams) ||
+      grams <= 0
+    ) {
+      setUsageError(
+        'Masukkan jumlah gram berupa angka bulat lebih dari 0.'
+      );
+      return;
+    }
+
+    if (
+      usageItem.stock_grams === null ||
+      usageItem.stock_grams === undefined
+    ) {
+      setUsageError(
+        'Stok gram belum diatur. Silakan edit bahan terlebih dahulu.'
+      );
+      return;
+    }
+
+    if (grams > usageItem.stock_grams) {
+      setUsageError(
+        `Stok tidak cukup. Sisa stok hanya ${usageItem.stock_grams} gram.`
+      );
+      return;
+    }
+
+    try {
+      setUsageLoading(true);
+      setUsageError('');
+      setErrorMessage('');
+
+      const { data, error } = await supabase.rpc(
+        'use_fridge_item_grams',
+        {
+          target_fridge_item_id: usageItem.id,
+          grams_to_use: grams,
+        }
+      );
+
+      if (error) {
+        throw error;
+      }
+
+      const householdId = householdIdRef.current;
+
+      setUsageModalVisible(false);
+      setUsageItem(null);
+      setUsageGrams('');
+
+      if (householdId) {
+        await Promise.all([
+          loadItems(
+            householdId,
+            true,
+            false
+          ),
+          loadStockHistory(
+            householdId,
+            true
+          ),
+        ]);
+      }
+
+      console.log(
+        'Remaining stock after usage:',
+        data
+      );
+    } catch (error) {
+      console.error(
+        'Use stock grams error:',
+        error
+      );
+
+      setUsageError(
+        error instanceof Error
+          ? error.message
+          : 'Gagal mengurangi stok. Silakan coba lagi.'
+      );
+    } finally {
+      setUsageLoading(false);
     }
   }
 
@@ -753,8 +1056,7 @@ export default function FridgeScreen() {
                   scanner atau input
                   manual.
                 </Text>
-
-                <Pressable
+             <Pressable
                   style={
                     styles.addButton
                   }
@@ -838,6 +1140,15 @@ export default function FridgeScreen() {
                               'Lainnya'}
                           </Text>
 
+                          {supportsGramStock(item.category) ? (
+                            <Text style={styles.stockText}>
+                              {item.stock_grams === null ||
+                              item.stock_grams === undefined
+                                ? 'Stok gram belum diatur'
+                                : `Sisa stok: ${item.stock_grams} gram`}
+                            </Text>
+                          ) : null}
+
                           <Text
                             style={[
                               styles.expiryText,
@@ -906,25 +1217,52 @@ export default function FridgeScreen() {
                           </Text>
                         </Pressable>
 
-                        <Pressable
-                          style={
-                            styles.usedButton
-                          }
-                          onPress={() =>
-                            openConfirmation(
-                              item,
-                              'used'
-                            )
-                          }
-                        >
-                          <Text
+                        {supportsGramStock(item.category) ? (
+                          <Pressable
+                            style={styles.usedButton}
+                            onPress={() => {
+                              if (item.stock_grams === 0) {
+                                openConfirmation(item, 'used');
+                                return;
+                              }
+
+                              openUsageModal(item);
+                            }}
+                          >
+                            <Text
+                              style={
+                                styles.usedButtonText
+                              }
+                            >
+                              {item.stock_grams === 0
+                                ? 'Stok Habis'
+                                : item.stock_grams === null ||
+                                  item.stock_grams === undefined
+                                ? 'Atur Stok'
+                                : '− Gunakan Gram'}
+                            </Text>
+                          </Pressable>
+                        ) : (
+                          <Pressable
                             style={
-                              styles.usedButtonText
+                              styles.usedButton
+                            }
+                            onPress={() =>
+                              openConfirmation(
+                                item,
+                                'used'
+                              )
                             }
                           >
-                            ✓ Sudah Terpakai
-                          </Text>
-                        </Pressable>
+                            <Text
+                              style={
+                                styles.usedButtonText
+                              }
+                            >
+                              ✓ Sudah Terpakai
+                            </Text>
+                          </Pressable>
+                        )}
 
                         <Pressable
                           style={
@@ -951,6 +1289,65 @@ export default function FridgeScreen() {
                 }
               )
             )}
+
+            <View style={styles.historySection}>
+              <View style={styles.historyHeader}>
+                <Text style={styles.historyTitle}>
+                  Riwayat Penggunaan
+                </Text>
+                <Text style={styles.historySubtitle}>
+                  Aktivitas penggunaan stok gram
+                </Text>
+              </View>
+
+              {usageHistory
+                .filter(
+                  (record) =>
+                    selectedCategory === 'Semua' ||
+                    record.category === selectedCategory
+                )
+                .length === 0 ? (
+                  <View style={styles.historyEmptyCard}>
+                    <Text style={styles.historyEmptyText}>
+                      Belum ada riwayat penggunaan.
+                    </Text>
+                  </View>
+                ) : (
+                  usageHistory
+                    .filter(
+                      (record) =>
+                        selectedCategory === 'Semua' ||
+                        record.category === selectedCategory
+                    )
+                    .map((record) => (
+                      <View
+                        key={record.id}
+                        style={styles.historyRow}
+                      >
+                        <View style={styles.historyAvatar}>
+                          <Text style={styles.historyAvatarText}>
+                            {getInitials(record.user_name)}
+                          </Text>
+                        </View>
+
+                        <View style={styles.historyInfo}>
+                          <Text style={styles.historyName}>
+                            {record.user_name}
+                          </Text>
+                          <Text style={styles.historyMeta}>
+                            {record.item_name}
+                            {' · '}
+                            {formatUsageDateTime(record.created_at)}
+                          </Text>
+                        </View>
+
+                        <Text style={styles.historyAmount}>
+                          −{record.grams_used} g
+                        </Text>
+                      </View>
+                    ))
+                )}
+            </View>
           </ScrollView>
         )}
 
@@ -1056,9 +1453,10 @@ export default function FridgeScreen() {
               <Text
                 style={styles.modalTitle}
               >
-                {confirmAction ===
-                'delete'
+                {confirmAction === 'delete'
                   ? 'Hapus bahan?'
+                  : selectedItem?.stock_grams === 0
+                  ? 'Pindahkan ke Riwayat?'
                   : 'Tandai sebagai terpakai?'}
               </Text>
 
@@ -1067,9 +1465,10 @@ export default function FridgeScreen() {
                   styles.modalDescription
                 }
               >
-                {confirmAction ===
-                'delete'
+                {confirmAction === 'delete'
                   ? `"${selectedItem?.name}" akan dihapus permanen dari kulkas bersama.`
+                  : selectedItem?.stock_grams === 0
+                  ? `"${selectedItem?.name}" sudah tidak memiliki stok dan akan dipindahkan ke Riwayat.`
                   : `"${selectedItem?.name}" akan dipindahkan ke Riwayat.`}
               </Text>
 
@@ -1124,10 +1523,104 @@ export default function FridgeScreen() {
                         styles.confirmButtonText
                       }
                     >
-                      {confirmAction ===
-                      'delete'
+                      {confirmAction === 'delete'
                         ? 'Hapus'
+                        : selectedItem?.stock_grams === 0
+                        ? 'Pindahkan'
                         : 'Ya, Tandai'}
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={usageModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeUsageModal}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <View
+                style={[
+                  styles.modalIcon,
+                  styles.modalIconUsed,
+                ]}
+              >
+                <Text style={styles.modalIconText}>
+                  −
+                </Text>
+              </View>
+
+              <Text style={styles.modalTitle}>
+                Gunakan Bahan
+              </Text>
+
+              <Text style={styles.modalDescription}>
+                {usageItem?.name}
+                {'\n'}
+                Sisa stok: {usageItem?.stock_grams ?? 0} gram
+              </Text>
+
+              <View style={styles.usageInputWrapper}>
+                <Text style={styles.usageInputLabel}>
+                  Berapa gram yang digunakan?
+                </Text>
+
+                <View style={styles.usageInputRow}>
+                  <TextInput
+                    style={styles.usageInput}
+                    value={usageGrams}
+                    onChangeText={setUsageGrams}
+                    placeholder="Contoh: 100"
+                    placeholderTextColor="#A0A7A1"
+                    keyboardType="number-pad"
+                    editable={!usageLoading}
+                  />
+                  <Text style={styles.usageUnit}>
+                    gram
+                  </Text>
+                </View>
+              </View>
+
+              {usageError ? (
+                <View style={styles.usageErrorBox}>
+                  <Text style={styles.usageErrorText}>
+                    {usageError}
+                  </Text>
+                </View>
+              ) : null}
+
+              <View style={styles.modalActions}>
+                <Pressable
+                  style={styles.cancelButton}
+                  onPress={closeUsageModal}
+                  disabled={usageLoading}
+                >
+                  <Text style={styles.cancelButtonText}>
+                    Batal
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={[
+                    styles.confirmButton,
+                    styles.confirmUsed,
+                  ]}
+                  onPress={handleUseGrams}
+                  disabled={usageLoading}
+                >
+                  {usageLoading ? (
+                    <ActivityIndicator
+                      color="#FFFFFF"
+                      size="small"
+                    />
+                  ) : (
+                    <Text style={styles.confirmButtonText}>
+                      Simpan
                     </Text>
                   )}
                 </Pressable>
@@ -1333,6 +1826,13 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
+  stockText: {
+    fontSize: 10,
+    color: '#2F7556',
+    fontWeight: '700',
+    marginTop: 5,
+  },
+
   expiryText: {
     fontSize: 10,
     color: '#2F7556',
@@ -1453,6 +1953,141 @@ const styles = StyleSheet.create({
   navText: {
     fontSize: 10,
     color: '#9AA39C',
+  },
+
+  historySection: {
+    marginTop: 22,
+    marginBottom: 10,
+  },
+
+  historyHeader: {
+    marginBottom: 10,
+  },
+
+  historyTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#252A25',
+  },
+
+  historySubtitle: {
+    fontSize: 10,
+    color: '#8A918B',
+    marginTop: 3,
+  },
+
+  historyEmptyCard: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E1E5E1',
+    borderRadius: 12,
+    padding: 15,
+  },
+
+  historyEmptyText: {
+    fontSize: 10,
+    color: '#8A918B',
+    textAlign: 'center',
+  },
+
+  historyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E8ECE8',
+    borderRadius: 12,
+    padding: 11,
+    marginBottom: 8,
+  },
+
+  historyAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#E6F2EA',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+
+  historyAvatarText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#2F7556',
+  },
+
+  historyInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  historyName: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#252A25',
+  },
+
+  historyMeta: {
+    fontSize: 9,
+    color: '#8A918B',
+    marginTop: 3,
+  },
+
+  historyAmount: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#D95E50',
+    marginLeft: 8,
+  },
+
+  usageInputWrapper: {
+    width: '100%',
+    marginTop: 18,
+  },
+
+  usageInputLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#48544B',
+    marginBottom: 7,
+  },
+
+  usageInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#DCE3DD',
+    backgroundColor: '#FAFBF9',
+    borderRadius: 9,
+    paddingHorizontal: 12,
+  },
+
+  usageInput: {
+    flex: 1,
+    height: 45,
+    color: '#252A25',
+    fontSize: 14,
+  },
+
+  usageUnit: {
+    fontSize: 11,
+    color: '#7E867F',
+    fontWeight: '600',
+  },
+
+  usageErrorBox: {
+    width: '100%',
+    backgroundColor: '#FCEAE7',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 10,
+  },
+
+  usageErrorText: {
+    fontSize: 10,
+    color: '#B95242',
+    lineHeight: 15,
   },
 
   modalOverlay: {
